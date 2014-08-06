@@ -13,12 +13,14 @@ module MoSQL
             :source => ent.fetch(:source),
             :type   => ent.fetch(:type),
             :name   => (ent.keys - [:source, :type]).first,
+            :transform => ent.fetch(:transform, false)
           }
         elsif ent.is_a?(Hash) && ent.keys.length == 1 && ent.values.first.is_a?(String)
           col = {
             :source => ent.first.first,
             :name   => ent.first.first,
-            :type   => ent.first.last
+            :type   => ent.first.last,
+            :transform => ent.fetch(:transform, false)
           }
         else
           raise SchemaError.new("Invalid ordered hash entry #{ent.inspect}")
@@ -174,21 +176,28 @@ module MoSQL
 
         source = col[:source]
         type = col[:type]
+        transform_col = col[:transform]
 
         if source.start_with?("$")
           v = fetch_special_source(obj, source)
         else
           v = fetch_and_delete_dotted(obj, source)
-          case v
-          when BSON::Binary, BSON::ObjectId, Symbol
-            v = v.to_s
-          when Hash
-            v = JSON.dump(v)
-          when Array
-            if col[:array_type]
-              v = Sequel.pg_array(v, col[:array_type])
-            else
+          if transform_col
+            b = v.to_s.bytes
+            format = "%02x" * b.length
+            v = format % b
+          else
+            case v
+            when BSON::Binary, BSON::ObjectId, Symbol
+              v = v.to_s
+            when Hash
               v = JSON.dump(v)
+            when Array
+              if col[:array_type]
+                v = Sequel.pg_array(v, col[:array_type])
+              else
+                v = JSON.dump(v)
+              end
             end
           end
         end
