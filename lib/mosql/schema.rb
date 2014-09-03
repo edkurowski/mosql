@@ -167,6 +167,23 @@ module MoSQL
       end
     end
 
+    def transform_primitive(v, type=nil)
+      case v
+      when BSON::ObjectId, Symbol
+        v.to_s
+      when BSON::Binary
+        if type.downcase == 'uuid'
+          v.to_s.unpack("H*").first
+        else
+          Sequel::SQL::Blob.new(v.to_s)
+        end
+      when BSON::DBRef
+        v.object_id.to_s
+      else
+        v
+      end
+    end
+
     def transform(ns, obj, schema=nil)
       schema ||= find_ns!(ns)
 
@@ -188,16 +205,17 @@ module MoSQL
             v = format % b
           else
             case v
-            when BSON::Binary, BSON::ObjectId, Symbol
-              v = v.to_s
             when Hash
-              v = JSON.dump(v)
+              v = JSON.dump(Hash[v.map { |k,v| [k, transform_primitive(v)] }])
             when Array
+              v = v.map { |it| transform_primitive(it) }
               if col[:array_type]
                 v = Sequel.pg_array(v, col[:array_type])
               else
                 v = JSON.dump(v)
               end
+            else
+              v = transform_primitive(v, type)
             end
           end
         end
@@ -281,6 +299,10 @@ module MoSQL
         'f'
       when Sequel::SQL::Function
         nil
+      when DateTime, Time
+        val.strftime("%FT%T.%6N %z")
+      when Sequel::SQL::Blob
+        "\\\\x" + [val].pack("h*")
       else
         val.to_s.gsub(/([\\\t\n\r])/, '\\\\\\1')
       end

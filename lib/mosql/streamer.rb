@@ -93,16 +93,34 @@ module MoSQL
         start_ts = @mongo['local']['oplog.rs'].find_one({}, {:sort => [['$natural', -1]]})['ts']
       end
 
-      @mongo.database_names.each do |dbname|
-        next unless spec = @schema.find_db(dbname)
+      dbnames = []
+
+      if dbname = options[:dbname]
+        log.info "Skipping DB scan and using db: #{dbname}"
+        dbnames = [ dbname ]
+      else
+        dbnames = @mongo.database_names
+      end
+
+      dbnames.each do |dbname|
+        spec = @schema.find_db(dbname)
+
+        if(spec.nil?)
+          log.info("Mongd DB '#{dbname}' not found in config file. Skipping.")
+          next
+        end
+
         log.info("Importing for Mongo DB #{dbname}...")
         db = @mongo.db(dbname)
-        db.collections.select { |c| spec.key?(c.name) }.each do |collection|
+        collections = db.collections.select { |c| spec.key?(c.name) }
+
+        collections.each do |collection|
           ns = "#{dbname}.#{collection.name}"
           import_collection(ns, collection, spec[collection.name][:meta][:filter])
           exit(0) if @done
         end
       end
+
 
       tailer.write_timestamp(start_ts) unless options[:skip_tail]
     end
@@ -178,6 +196,15 @@ module MoSQL
       log.debug("processing op: #{op.inspect}")
       unless op['ns'] && op['op']
         log.warn("Weird op: #{op.inspect}")
+        return
+      end
+
+      # First, check if this was an operation performed via applyOps. If so, call handle_op with
+      # for each op that was applied.
+      # The oplog format of applyOps commands can be viewed here:
+      # https://groups.google.com/forum/#!topic/mongodb-user/dTf5VEJJWvY
+      if op['op'] == 'c' && (ops = op['o']['applyOps'])
+        ops.each { |op| handle_op(op) }
         return
       end
 

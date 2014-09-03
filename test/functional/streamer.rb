@@ -77,7 +77,7 @@ EOF
 
       @sequel.drop_table?(:sqltable)
       @sequel.drop_table?(:sqltable2)
-      @sequel.drop_table(:composite_table)
+      @sequel.drop_table?(:composite_table)
       @map.create_schema(@sequel)
 
       @streamer = build_streamer
@@ -91,6 +91,22 @@ EOF
                             'op' => 'u',
                             'o2' => { '_id' => o['_id'] },
                             'o'  => { 'var' => 27 }
+                          })
+      assert_equal(27, sequel[:sqltable].where(:_id => o['_id'].to_s).select.first[:var])
+    end
+
+    it 'applies ops performed via applyOps' do
+      o = { '_id' => BSON::ObjectId.new, 'var' => 17 }
+      @adapter.upsert_ns('mosql_test.collection', o)
+
+      op = { 'ns' => 'mosql_test.collection',
+             'op' => 'u',
+             'o2' => { '_id' => o['_id'] },
+             'o'  => { 'var' => 27 }
+           }
+      @streamer.handle_op({ 'op' => 'c',
+                            'ns' => 'mosql_test.$cmd',
+                            'o' => { 'applyOps' => [op] }
                           })
       assert_equal(27, sequel[:sqltable].where(:_id => o['_id'].to_s).select.first[:var])
     end
@@ -300,6 +316,58 @@ EOF
 
       sqlobjs = @sequel[:sqltable].select.to_a
       assert_equal(ids.map(&:to_s).sort, sqlobjs.map { |o| o[:_id] }.sort)
+    end
+  end
+  describe 'timestamps' do
+  TIMESTAMP_MAP = <<EOF
+---
+db:
+  has_timestamp:
+    :meta:
+      :table: has_timestamp
+    :columns:
+      - _id: TEXT
+      - ts: timestamp
+EOF
+
+    before do
+      @map = MoSQL::Schema.new(YAML.load(TIMESTAMP_MAP))
+      @adapter = MoSQL::SQLAdapter.new(@map, sql_test_uri)
+
+      mongo['db']['has_timestamp'].drop
+      @sequel.drop_table?(:has_timestamp)
+      @map.create_schema(@sequel)
+
+      @streamer = build_streamer
+    end
+
+    it 'preserves milliseconds on import' do
+      ts = Time.utc(2014, 8, 7, 6, 54, 32, 123000)
+      mongo['db']['has_timestamp'].insert({ts: ts})
+      @streamer.options[:skip_tail] = true
+      @streamer.initial_import
+
+      row = @sequel[:has_timestamp].select.to_a
+      assert_equal(1, row.length)
+      assert_equal(ts.to_i, row.first[:ts].to_i)
+      assert_equal(ts.tv_usec, row.first[:ts].tv_usec)
+    end
+
+    it 'preserves milliseconds on tailing' do
+      ts = Time.utc(2006,01,02, 15,04,05,678000)
+      id = mongo['db']['has_timestamp'].insert({ts: ts})
+      @streamer.handle_op(
+        {
+          "ts" => {"t" => 1408647630, "i" => 4},
+          "h"  => -965650193548512059,
+          "v"  => 2,
+          "op" => "i",
+          "ns" => "db.has_timestamp",
+          "o"  => mongo['db']['has_timestamp'].find_one({_id: id})
+        })
+      got = @sequel[:has_timestamp].where(:_id => id.to_s).select.first[:ts]
+      assert_equal(ts.to_i, got.to_i)
+      assert_equal(ts.tv_usec, got.tv_usec)
     end
   end
 end
